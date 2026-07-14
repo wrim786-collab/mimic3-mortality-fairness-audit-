@@ -1,0 +1,689 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{setspace}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\usepackage{xcolor}
+\newcommand{\hl}[1]{\par\noindent\colorbox{yellow}{\parbox{\dimexpr\linewidth-2\fboxsep}{#1}}\par}
+\Urlmuskip=0mu plus 1mu\relax
+\onehalfspacing
+
+\sloppy
+\begin{document}
+
+%% ===== TITLE PAGE =====
+\begin{titlepage}
+\centering
+\vspace*{1cm}
+{\LARGE\bfseries Fairness and Explainability Under Missingness:\\[0.3cm]
+An Interpretable Analysis of In-Hospital Mortality Prediction\\ on the MIMIC-III Cohort\par}
+\vspace{2cm}
+
+\end{titlepage}
+
+\tableofcontents
+\listoftables
+\listoffigures
+
+
+\chapter*{Abstract}
+Machine learning models are increasingly used to predict in-hospital mortality from electronic health records (EHRs), but their clinical adoption depends not only on accuracy, but also on explainability and fairness. Missing data remains a persistent yet under-explored challenge and is widely present in EHRs. While the literature has separately studied how to handle missing data, how to explain model predictions, and how to ensure fairness, limited work has systematically investigated how the choice of missing-data strategy jointly affects the performance, fairness, and explainability of a clinical prediction model within a single pipeline. This study addresses that gap.
+
+Using the MIMIC-III admissions cohort, restricted to 50,866 adult admissions (newborns excluded) and to predictors genuinely available at the time of admission (demographics, admission type and location, admitting diagnosis and procedure, insurance, religion, and marital status), this study analysed in-hospital mortality prediction across six missing-data strategies (mean, median, KNN, MICE, and MissForest imputation, plus native handling) combined with three classifiers (logistic regression, random forest, and XGBoost) in a factorial design. Models were evaluated across controlled levels of synthetically induced missingness (10\%, 30\%, and 50\%) under Missing Completely at Random (MCAR), Missing at Random (MAR), and Missing Not at Random (MNAR) mechanisms. Predictive performance was measured using AUROC, AUPRC, calibration, and threshold metrics; explainability was analysed using SHAP, including explanation stability across imputation methods; and fairness was audited across gender, insurance type, age band, and ethnicity using four fairness metrics with bootstrap confidence intervals.
+
+After excluding post-admission (outcome-adjacent) features, the best admission-time model was XGBoost with MICE imputation, achieving an AUROC of 0.769 (95\% CI 0.755--0.784) and an AUPRC of 0.332 --- consistent with the discrimination typically reported for genuinely prospective, admission-only MIMIC mortality models, and substantially lower than the inflated AUROC obtained when stay-level summary features (length of stay, total clinical interactions, counts of labs/procedures) are included. SHAP analysis identified the admitting procedure code, age, and admitting diagnosis as the most influential predictors, and these rankings remained stable across imputation methods. The fairness audit revealed the largest disparities across ethnicity (false-negative-rate gap 0.625, though based on small and uneven subgroup sizes) and age band (0.464), with gender showing the smallest gap (0.015). Extending the audit across all six missing-data strategies showed that no single strategy is uniformly fairest: native handling produced the smallest fairness gap for age band (0.315) but the largest gap observed anywhere in the study for ethnicity (0.833), while mean imputation showed close to the opposite pattern. MICE imputation outperformed XGBoost's native missing-value handling by a modest but non-negligible margin (AUROC 0.769 vs 0.707; bootstrap 95\% CI for the difference [0.047, 0.078]; McNemar p \textless 0.001).
+
+These results indicate that missing-data handling, explainability, and fairness are interconnected, and that the choice of missing-data strategy can materially affect both predictive performance and fairness outcomes. The study concludes that missing-data handling should not be assumed to be fairness-neutral, and that fairness should be evaluated under the specific data-handling strategy used, with appropriate uncertainty quantification given subgroup sample sizes. This study provides a reproducible, leakage-free, explainable approach that can be applied to other admission-time clinical prediction tasks.
+
+Keywords: in-hospital mortality prediction; missing data; imputation; explainable AI; SHAP; fairness; bias audit; MIMIC-III; machine learning
+
+
+\chapter{Introduction}
+
+\section{Background}
+Machine learning (ML) is increasingly used to support clinical decision-making, particularly for predicting patient outcomes such as in-hospital mortality. By learning patterns from large-scale electronic health record (EHR) data available at admission, predictive models have the potential to flag high-risk patients earlier than traditional scoring systems, supporting timely clinical review. As these models move closer to clinical implementation, however, predictive accuracy alone is no longer considered sufficient. Two additional requirements have become central to reliable clinical ML: the predictions must be explainable, so that clinicians can understand and evaluate them, and they must also be fair, to ensure that no particular patient group is systematically disadvantaged.
+
+An ongoing practical challenge underlying all of these requirements is missing data. EHRs are created during routine care rather than for research, and as a result they contain substantial missing data because patients are not tested at regular intervals, records are incomplete, and hospital procedures vary. The way in which this missing data is handled --- most commonly through imputation, or alternatively through models that handle missingness natively --- can affect not only predictive accuracy but also the explanations provided by the model and how fairly it makes predictions.
+
+A further methodological requirement for any model claiming to support early, admission-time intervention is that its predictors must genuinely be available at admission. Stay-level summary variables such as length of stay or the total number of clinical interactions during the stay are only known once the stay is complete, and including them would allow the model to partly infer the outcome from its own consequences rather than predict it in advance. This study therefore restricts its feature set to information available at or near the time of admission, so that its predictive-performance estimates reflect a genuinely prospective task.
+
+\section{Problem Statement}
+Although missing-data handling, explainability, and fairness have each been studied extensively, they are rarely examined together, and rarely examined within a feature set that is genuinely restricted to information available at admission. There is still uncertainty about whether missing-data handling methods affect model fairness and explainability once outcome-adjacent features are removed. A model may achieve reasonable overall accuracy under different missing-data strategies, yet those strategies may differ in how fair they are to different groups of patients and which variables they rely on most. This study investigates this issue by examining how six missing-data methods and three classification models differ in prediction performance, explainability, and fairness for an admission-time clinical mortality-prediction task.
+
+\section{Motivation}
+The motivation for this study comes from three recent works in clinical machine learning. The first, by Bhandari and Tyagi (2026), examined methods for handling missing data in EHRs and showed that imputation can change the underlying data distribution, but did not examine the consequences for fairness or explanation. The second, a systematic review of explainable AI for critical-care prediction by Athukorala and Ilmini (2026), found that fairness and bias mitigation remain underexplored and that the interaction between data quality and explainability is rarely examined. The third, by Pylarinou et al. (2026), presented an interpretable clinical decision-support system but did not incorporate any fairness analysis or treatment of missingness. Taken together, these works indicate a common gap: no existing study examines how the missing-data-handling strategy jointly affects fairness and explainability in a genuinely admission-time clinical prediction task. This study aims to fill that gap.
+
+
+\section{Research Questions}
+This study is guided by three research questions:
+
+RQ1. Do imputation-based and direct missing-data handling strategies achieve comparable predictive performance for admission-time in-hospital mortality prediction across varying levels and mechanisms of missingness?
+
+RQ2. Which admission-time features are most influential in the mortality-prediction model, and are these clinically meaningful?
+
+RQ3. Do the missing-data strategies differ in their fairness across demographic subgroups, and which subgroups are most affected?
+
+
+\section{Aim and Objectives}
+The aim of this study is to conduct an interpretable bias audit of admission-time in-hospital mortality prediction under different missing-data strategies, using the MIMIC-III admissions cohort. The specific objectives are:
+
+To develop in-hospital mortality prediction models, restricted to features available at admission, under six missing-data strategies (mean, median, KNN, MICE, and MissForest imputation, plus native handling).
+
+To examine and compare their predictive accuracy across controlled levels and mechanisms of missingness.
+
+To analyse model explainability using SHAP and verify that important features are clinically meaningful.
+
+To audit the fairness of predictions across gender, insurance type, age band, and ethnicity.
+
+To compare the fairness of the missing-data strategies and identify the most affected subgroups.
+
+
+\section{Significance of the Study}
+This study helps improve reliable clinical machine learning by connecting three important areas --- missing-data handling, model explainability, and fairness --- within a feature set that is genuinely available at admission. These areas are usually studied separately, and studies that do combine them often retain outcome-adjacent features that inflate apparent performance. By examining a leakage-free mortality-prediction model using all three aspects together, the study provides empirical evidence on whether the choice of missing-data strategy is fairness-neutral. The results help researchers develop clinical prediction models that are accurate, interpretable, and fair. As a bias audit on a widely used public dataset, the study also demonstrates a method that can be applied to other clinical prediction tasks.
+
+
+\section{Scope and Limitations}
+This study focuses on predicting in-hospital mortality at the time of admission using structured, admission-time data from the MIMIC-III admissions dataset. Post-admission summary variables (length of stay, counts of labs, procedures, chart events, transfers, and total clinical interactions) were deliberately excluded from the predictor set to preserve a genuinely prospective framing; consequently, the reported discrimination is lower than would be obtained from a retrospective, stay-level summary model, but it is the appropriate estimate for the claimed use case. Since the dataset contains admission-level information and does not include time-series data or clinical notes, the study does not cover real-time patient deterioration or hospital readmission prediction. In addition, the data comes from a single hospital, which may limit how well the results generalise to other hospitals or healthcare settings. These limitations are discussed further in the final chapter.
+
+
+\section{Thesis Organisation}
+The remainder of this thesis is organised as follows. Chapter 2 reviews the relevant literature on missing-data handling, explainable AI, and fairness in clinical prediction, and identifies the research gap. Chapter 3 describes the dataset, preprocessing, missingness design, models, and evaluation framework, including the admission-time feature restriction. Chapter 4 presents the experimental results for each research question. Chapter 5 discusses the findings and their implications. Chapter 6 concludes the thesis and outlines directions for future work.
+
+
+\chapter{Literature Review}
+
+\section{Introduction}
+This chapter reviews the body of research relevant to the present study, which sits at the intersection of four areas: mortality prediction in critical care, the handling of missing data in electronic health records (EHRs), explainable artificial intelligence (XAI), and fairness in clinical machine learning. The chapter first surveys each area in turn, summarising the methods commonly used and the findings reported. It then synthesises this work to identify the research gap that motivates this study --- namely, the absence of any investigation into how the choice of missing-data strategy jointly affects the fairness and explainability of a clinical prediction model that is restricted to genuinely admission-time predictors.
+
+
+\section{Mortality Prediction in Critical Care}
+Predicting in-hospital mortality has become one of the most widely studied tasks in clinical machine learning, in large part because publicly available critical-care databases such as MIMIC-III have made large-scale experimentation possible (Johnson et al., 2016). A broad range of models has been applied to this task, from interpretable baselines such as logistic regression to ensemble methods and deep neural networks.
+
+A representative recent study developed and compared several machine learning and deep learning models --- including gradient boosting, logistic regression, support vector machines, random forests, and recurrent networks --- to predict in-hospital mortality among critically ill hypertensive patients using MIMIC-IV, integrating both interpretability and fairness analysis into the evaluation. The authors reported that tree-based ensemble methods performed competitively and that demographic and clinical features were strong predictors, while also cautioning that reliance on a single healthcare system limits generalisability. Other work has shown that strong discrimination can be achieved for short-term ICU mortality even when substantial data is missing, provided the missingness is handled appropriately, although reported AUROC values vary considerably depending on whether admission-only or full-stay features are used. Collectively, this literature establishes that mortality prediction is both feasible and well studied, but also that performance, and the features driving it, depend heavily on the dataset, the prediction horizon, and on data-handling choices --- including, critically, whether post-admission information is permitted into the feature set.
+
+A systematic review of artificial intelligence and machine learning models for ICU mortality prediction confirmed that extreme gradient boosting (XGBoost), random forest, and logistic regression are the most commonly used algorithms, with data drawn predominantly from the MIMIC and eICU databases (Tang et al., 2025). This pattern recurs across disease-specific applications: XGBoost has been used to predict in-hospital mortality in acute heart failure (Zhao et al., 2024), congestive heart failure with external validation on eICU (Chen et al., 2023), spontaneous intracerebral haemorrhage with SHAP-based interpretation, lung cancer admissions, and myocardial infarction using time-resolved Shapley values. Studies of feature combinations have further shown that the selection of input variables materially affects mortality-model performance (Stenwig et al., 2025) --- a finding directly relevant to the present study's decision to exclude post-admission summary features. Together, these works confirm that gradient-boosted and ensemble tree models are the de facto standard for tabular ICU mortality prediction, and that explainability is increasingly reported alongside accuracy.
+
+
+\section{Handling Missing Data in Electronic Health Records}
+Missing data is an inherent feature of EHRs, which are generated during routine care rather than according to research protocols. As a result, values are frequently absent due to irregular testing, incomplete documentation, and variation in clinical workflow. The literature distinguishes three missingness mechanisms --- Missing Completely at Random (MCAR), Missing at Random (MAR), and Missing Not at Random (MNAR) --- and the appropriate handling strategy depends on which mechanism is assumed.
+
+Two broad families of approaches exist. The first is imputation, in which missing values are filled before modelling, using methods ranging from simple mean or median substitution to more sophisticated techniques such as k-nearest-neighbour imputation, multiple imputation by chained equations (van Buuren and Groothuis-Oudshoorn, 2011), and random-forest-based imputation (missForest; Stekhoven and Buhlmann, 2012). The second family handles missingness directly during modelling, for example through missing-value indicators or algorithms that accommodate incomplete inputs natively. A recent comparison of missing-data strategies for EHR-based risk prediction found that a missing-indicator approach achieved the strongest discrimination, and that combining indicators with imputation offered marginal further gains. Similarly, a study of extremely incomplete data in a COVID-19 mortality context reported that combining strategies that preserve informative missingness with tree-based ensemble classifiers maximised performance. Imputation based on patient similarity has also been proposed as a way to exploit relationships between records. The base study most directly relevant to the present work compared imputation against direct modelling and demonstrated that imputation can shift the underlying data distribution, whereas models that handle missingness internally may preserve clinically meaningful structure more faithfully (Bhandari and Tyagi, 2026). However, this body of work focuses almost entirely on predictive accuracy and does not consider the consequences of the missing-data strategy for fairness or explainability.
+
+
+\section{Class Imbalance in Clinical Prediction}
+Another challenge in mortality prediction is class imbalance, since the event of interest (death) is typically rare. The Synthetic Minority Over-sampling Technique (SMOTE) is the most widely used correction, and recent studies have combined SMOTE with SHAP to address imbalance and explainability together in clinical prediction. However, the literature also suggests that imbalance corrections must be applied with care: a simulation study found that resampling techniques such as random over-sampling and SMOTE can harm model calibration, particularly for tree-based models, even when discrimination is maintained (Carriero et al., 2025). Other work has proposed improvements such as boundary-aware or quantum-inspired variants of SMOTE for extreme imbalance in medical data. These findings motivated the choice, in the present study, of class weighting (rather than synthetic resampling) as a leakage-free way of addressing imbalance, alongside the reporting of AUPRC, which is more informative than AUROC under imbalance.
+
+
+\section{Explainable Artificial Intelligence in Clinical Prediction}
+As machine learning models have grown more complex, their black-box nature has become a barrier to clinical adoption, since clinicians must be able to understand and justify the predictions they act upon. Explainable AI addresses this by providing interpretable insights into model behaviour. Two model-agnostic techniques dominate the clinical literature: SHAP (Shapley Additive Explanations), introduced by Lundberg and Lee (2017), and LIME (Local Interpretable Model-agnostic Explanations), introduced by Ribeiro et al. (2016).
+
+SHAP has become the most widely used technique, particularly for explaining tree-based ensemble models, because it provides both global feature-importance rankings and patient-specific explanations grounded in a principled, game-theoretic foundation. Comparative analyses of SHAP and LIME in healthcare report that both improve transparency, with SHAP generally favoured for its consistency. SHAP has been applied across numerous clinical tasks, including health monitoring on MIMIC-III, stroke outcome prediction, hospital stay and cost estimation, and ensemble-based tumour prediction, consistently identifying clinically plausible predictors. Nonetheless, the literature also cautions against over-reliance on these methods: explanations can sometimes reflect spurious correlations or artefacts of an overfitted model rather than genuine causal relationships, and so should complement, rather than replace, clinical judgement. This caveat reinforces the importance of verifying that a model's most influential features are clinically meaningful and, as this study emphasises, genuinely available at the point the prediction would be made.
+
+
+\section{Fairness in Clinical Machine Learning}
+Fairness has emerged as a critical concern in clinical machine learning, because models trained on routinely collected data can encode and reproduce existing healthcare inequities. The seminal study by Obermeyer et al. (2019) demonstrated that a widely used commercial risk algorithm systematically underestimated the illness severity of Black patients, because it used healthcare cost as a proxy for health need; correcting this proxy substantially reduced the bias. This work established algorithmic bias as a central problem in healthcare AI and motivated a wave of subsequent research. A scoping review of bias in clinical algorithms catalogued pre-processing, in-processing, and post-processing mitigation strategies and found that bias frequently disadvantages already-vulnerable patient groups.
+
+Fairness is typically evaluated by partitioning patients according to protected attributes --- most commonly ethnicity, gender, age, and insurance type --- and comparing model performance across the resulting subgroups. Several formal fairness criteria have been proposed, including demographic parity (Dwork et al., 2012) and equalised odds (Hardt et al., 2016). The work most directly relevant to the present study evaluated interpretability and fairness together for in-hospital mortality prediction on MIMIC-IV, using ethnicity, gender, marital status, age, and insurance type as protected attributes (Liu et al., 2022). It reported a strong correlation between subgroup mortality rates and fairness, with models tending to achieve lower AUC for groups with higher mortality, and it examined the interaction between feature importance and fairness. Other studies have specifically documented disparities in mortality prediction by gender and insurance type, and have assessed racial bias using matched-counterpart designs. More recent work on large-language-model-based ICU mortality prediction has highlighted a recurring tension between fairness and predictive performance, where improvements in one can come at the cost of the other. Broader perspectives on responsible and ethical machine learning in healthcare (Chen et al., 2021) reinforce these concerns. Crucially, however, the systematic review that motivated the present study concluded that fairness and bias mitigation remain underexplored in clinical XAI, and that the interaction between data quality and interpretability is rarely examined (Athukorala and Ilmini, 2026).
+
+It is also worth noting that demographic-parity differences are an imperfect fairness criterion in this setting, since baseline mortality rates genuinely differ across the subgroups considered (for example, by age band). A demographic-parity gap therefore partly reflects real differences in underlying risk rather than model unfairness. For this reason, this study treats the false-negative-rate gap and equal-opportunity difference --- which compare error rates among patients who actually experienced the outcome --- as the primary, clinically motivated fairness criteria, while still reporting demographic parity for completeness and comparability with prior work.
+
+
+\section{Research Gap}
+The reviewed literature demonstrates that mortality prediction, missing-data handling, explainability, and fairness have each been studied extensively, but almost always in isolation, and frequently using feature sets that mix admission-time and post-admission information without distinguishing between them. The missing-data literature evaluates strategies primarily on predictive accuracy, without considering their fairness or explainability implications. The explainability literature focuses on making predictions transparent, but rarely connects this to data quality, fairness, or the timing of feature availability. The fairness literature audits models for subgroup disparities, but typically assumes a fixed data-handling pipeline and does not examine whether the missing-data strategy itself influences those disparities. The three works that directly motivated this study illustrate this fragmentation: Bhandari and Tyagi (2026) compared missing-data strategies but not their fairness consequences; Athukorala and Ilmini (2026) reviewed clinical XAI and explicitly identified fairness as underexplored; and Pylarinou et al. (2026) developed an interpretable clinical decision-support system but incorporated neither fairness analysis nor a treatment of missingness. This fragmentation is summarised in Table~\ref{tab:gap-summary}.
+
+
+\begin{table}[H]
+\centering
+\caption{Summary of related work and gaps addressed.}
+\label{tab:gap-summary}
+\small
+\begin{tabular}{p{3.5cm}p{4.5cm}p{4.5cm}}
+\toprule
+Work & Focus & What it did not address \\
+\midrule
+Missing-data comparison study & Imputation vs.\ direct handling for accuracy & Fairness and explainability \\
+XAI systematic review & Interpretable models for ICU prediction & Fairness (identified as a gap); data-quality interaction \\
+Interpretable decision-support system & Evidence-traceable clinical recommendations & Fairness and missing-data handling \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Although missing-data handling, explainability, and fairness have each been studied individually, and some work has examined pairs of these (such as missingness and fairness, or fairness and explainability), limited work has systematically investigated the interaction between missing-data handling, fairness, and explainability within a single unified framework restricted to genuinely admission-time predictors. This is the gap the present study addresses, by comparing six imputation strategies across fairness and explanation outcomes on the same, leakage-free, mortality-prediction task.
+
+
+\section{Summary}
+This chapter reviewed the literature on mortality prediction, missing-data handling, explainable AI, and fairness in clinical machine learning. While each area is well developed individually, they are seldom integrated, and rarely with explicit attention to which features are genuinely available at prediction time. In particular, the influence of missing-data handling on fairness and explainability, within an admission-time feature set, has not been investigated. The following chapter describes the methodology designed to address this gap.
+
+
+\chapter{Methodology}
+
+\section{Introduction}
+This chapter describes the methodology adopted to investigate the interaction between missing-data handling, model explainability, and fairness in admission-time clinical mortality prediction. It outlines the dataset, the admission-time feature restriction adopted to avoid target leakage, data preprocessing procedures, the design of the missingness experiments, the predictive models, and the evaluation framework used to address the three research questions.
+
+
+\section{Research Design}
+The study follows a quantitative, experimental design using a publicly available, de-identified electronic health record (EHR) dataset. The study follows seven stages: data preparation and cohort cleaning, restriction of the feature set to admission-time predictors, creation of synthetic missing values, model development using six missing-data strategies in a factorial design, predictive evaluation, explainability analysis, and a fairness audit. The six missing-data strategies --- mean, median, KNN, MICE, and MissForest imputation, plus native handling --- are compared not only for prediction performance but also for the consistency of their explanations and their fairness across different demographic groups.
+
+
+\section{Dataset}
+The study uses the MIMIC-III (Medical Information Mart for Intensive Care III) admissions cohort, a publicly available critical-care database collected from a large hospital, comprising 58,976 hospital admissions and 28 recorded fields. As described in Section~\ref{sec:leakage-fix} and Section~\ref{sec:newborn-fix}, this raw cohort was reduced to 50,866 admissions after removing newborn admissions, and its feature set was restricted to variables available at the time of admission. The target variable is in-hospital mortality (ExpiredHospital), which indicates whether a patient died during the hospital stay.
+
+The cleaned cohort exhibited a mortality rate of 11.4\%, indicating a class-imbalanced problem; this imbalance was addressed during model training through class weighting rather than synthetic resampling (Section~\ref{sec:class-imbalance-method}).
+
+Figure~\ref{fig:mortality-dist} shows the distribution of the mortality outcome and patient age after cleaning.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{mortality_distribution.png}
+\caption{Distribution of the mortality outcome and patient age, after newborn exclusion.}
+\label{fig:mortality-dist}
+\end{figure}
+
+
+\subsection{Avoiding Target Leakage: Restriction to Admission-Time Features}
+\label{sec:leakage-fix}
+An earlier iteration of this analysis included stay-level summary features --- length of stay (LOSdays), the total number of clinical interactions (TotalNumInteract), and counts of labs, procedures, callouts, transfers, chart events, and inputs/outputs recorded during the admission. Because these quantities are only known once the hospital stay is complete, their inclusion is inconsistent with the stated aim of predicting mortality \emph{at the time of admission}, and it allows the model to partly infer the outcome from a consequence of that outcome (a short, intense stay versus a long recovery) rather than from information available in advance. This is also the most plausible explanation for the very high discrimination (AUROC above 0.93) obtained in that earlier iteration, since genuine admission-time MIMIC mortality models typically achieve AUROC in the 0.75--0.87 range.
+
+To correct this, all post-admission summary variables were removed from the predictor set. The retained predictors are: gender, age, admission type, admission location, admitting diagnosis, insurance type, religion, marital status, ethnicity, and admitting procedure code --- ten features, all of which are recorded at or before the point of admission. The outcome variable (ExpiredHospital) and the patient identifier (hadm\_id) were also removed from the predictor set. With this restriction, the best model's AUROC fell from 0.939 to 0.769, which is the correct estimate of admission-time predictive performance and is consistent with values reported elsewhere in the literature for prospective, admission-only mortality models.
+
+\subsection{Newborn Exclusion}
+\label{sec:newborn-fix}
+MIMIC-III includes newborn admissions, whose mortality risk profile (0.8\% in this cohort) is not comparable to that of adult patients (11.4\%), and mixing the two would confound any mortality model. Newborn admissions (age = 0) were therefore excluded prior to modelling. In addition, because MIMIC-III de-identification procedures recode ages above 89 as 300, the cleaned age variable was checked for this artefact; no such values were present in this cohort (age range 0--89 before newborn exclusion; 1--89 after), but the check is retained in the preprocessing pipeline as good practice for any future re-extraction from the raw MIMIC-III tables.
+
+
+\section{Data Preprocessing}
+Several preprocessing steps were applied prior to modelling. First, placeholder and uninformative values --- such as ``na'' in the admission-procedure field and ``unknown/not specified'' entries in ethnicity and religion --- were recoded as genuine missing values, ensuring that missingness was represented consistently. Second, the outcome variable was separated from the predictor features, and demographic attributes were retained separately to enable the subsequent fairness analysis. Third, categorical variables were encoded numerically, with low-cardinality variables one-hot encoded and high-cardinality variables encoded using category codes. Age, the principal numeric predictor remaining after the leakage fix, was standardised where required by the model, and was additionally discretised into four bands (\textless 40, 40--60, 60--75, and 75+) for subgroup fairness evaluation.
+
+Finally, the data was partitioned into training (80\%) and test (20\%) sets using stratified sampling on the outcome variable, preserving the 11.4\% mortality ratio in both partitions. All imputation, scaling, and class-weighting procedures were fitted exclusively on the training data and then applied to the test data, to prevent information leakage between folds.
+
+
+\section{Missingness Design}
+To study model behaviour under controlled conditions, missingness was examined from two sources. The first was the naturally occurring missingness already present in the dataset. The second was synthetically induced missingness, generated at three rates (10\%, 30\%, and 50\%) under three mechanisms: Missing Completely at Random (MCAR), Missing at Random (MAR), and Missing Not at Random (MNAR). Under MCAR, each value was removed with a fixed probability independent of any data. Under MAR, the probability of missingness depended on another observed variable (age); values associated with older patients were removed with higher probability. Under MNAR, the probability of missingness depended on the value itself, so that larger values were more likely to be removed. Formally, for a feature value $X$, the probability of being missing under the value-dependent mechanisms was modelled as $P(M=1 \mid X) = 1.5r$ when $X$ exceeded the feature median and $0.5r$ otherwise, where $r$ is the target missingness rate.
+
+Combined with the original (naturally occurring) missingness pattern, this produced ten dataset versions in total (one original plus $3\times3 = 9$ synthetic conditions), covering all three standard missingness mechanisms at three severities, in line with established missing-data theory. This corrects an earlier, inconsistent statement in this thesis that referred to ``seven'' dataset versions.
+
+
+\section{Predictive Models}
+Three classification models were used, each with a different level of complexity and interpretability. Logistic regression served as an interpretable baseline. Random forest, an ensemble of decision trees, captured non-linear relationships. XGBoost, a gradient-boosting algorithm, was included for its strong performance on tabular clinical data and its native handling of missing values. All models used balanced class weighting to address the 11.4\% mortality rate.
+
+\label{sec:class-imbalance-method}
+Class imbalance was addressed exclusively through balanced class weighting (\texttt{class\_weight='balanced'} for logistic regression and random forest; \texttt{scale\_pos\_weight} for XGBoost) rather than synthetic resampling such as SMOTE. This choice avoids any risk of resampling-related leakage across cross-validation folds and is consistent with evidence that resampling corrections can harm model calibration in tree-based models (Carriero et al., 2025).
+
+Hyperparameters were tuned by randomised search (20 candidate configurations, 3-fold stratified cross-validation, optimising AUROC) over the MICE-imputed training data. The search space covered the number of estimators (100, 200, 300), maximum tree depth (3, 5, 7), learning rate (0.01, 0.05, 0.1), subsample ratio (0.8, 1.0), and column-sampling ratio (0.8, 1.0). The best configuration found was 300 estimators, maximum depth 3, learning rate 0.1, subsample 1.0, and column-sampling 1.0, achieving a cross-validated AUROC of 0.777. Random forest models used 100--200 estimators with balanced class weighting.
+
+To avoid confounding the effect of the imputation method with the effect of the learning algorithm, a factorial design was adopted: each imputation strategy was paired with each classifier, so that the two factors could be separated. Six missing-data strategies were compared: mean imputation, median imputation, k-nearest-neighbour (KNN) imputation, Multiple Imputation by Chained Equations (MICE), MissForest (random-forest-based iterative imputation), and native missing-value handling by XGBoost.
+
+
+\section{Evaluation Framework}
+Model performance was assessed using two discrimination metrics: the Area Under the Receiver Operating Characteristic Curve (AUROC) and the Area Under the Precision-Recall Curve (AUPRC), the latter reported because it is more informative under class imbalance. In addition, threshold-based metrics were computed at a 0.5 cut-off: sensitivity, specificity, precision, and the F1-score. Calibration was assessed using the Brier score.
+
+To ensure robust and stable estimates rather than relying on a single train-test split, 5-fold stratified cross-validation was used, repeated across three random seeds (42, 1, 2; 15 folds in total), with results reported as mean $\pm$ standard deviation. Uncertainty on the test-set AUROC was additionally quantified using bootstrap resampling (1000 iterations, resampling patients with replacement) to obtain a 95\% confidence interval.
+
+Explainability was assessed using SHAP (Shapley Additive Explanations), which quantifies the contribution of each feature to the model's predictions. Beyond global feature-importance rankings, SHAP analysis included beeswarm summary plots, bar plots, dependence plots for key admission-time features (age, admitting diagnosis, and admitting procedure), and patient-level waterfall plots for a surviving and an expired patient. The stability of SHAP explanations was examined across the six imputation methods, to assess whether the choice of missing-data strategy alters the model's explanations.
+
+Fairness was evaluated across four sensitive attributes: gender, insurance type, age band, and ethnicity. Four fairness metrics were calculated for each attribute: demographic parity difference, equal opportunity difference, equalized odds difference, and the false-negative-rate (FNR) gap, each with a bootstrap 95\% confidence interval (1000 resamples). The FNR gap is treated as the primary, clinically motivated fairness criterion in this setting, because a false negative means that a patient who eventually dies is not identified as high risk. Statistical comparisons between missing-data strategies used the Wilcoxon signed-rank test (for paired cross-validated scores) and the McNemar test (for paired classification errors), alongside bootstrap confidence intervals for AUROC differences.
+
+
+\section{Reproducibility}
+To make the results consistent and reproducible, a fixed random seed (42) was used throughout, and all data preprocessing, imputation, and class-weighting procedures were fitted on the training set only, before being applied to the test set. Cross-validation was additionally repeated across three seeds (42, 1, 2) to check the stability of the reported estimates. The analysis was conducted in Python 3, using scikit-learn (1.7.2), XGBoost (3.2.0), SHAP (0.52.0), pandas (2.3.3), NumPy (2.3.5), and SciPy (1.15.3).
+
+\textbf{Code availability.} The full analysis code (data cleaning, the admission-time feature restriction, imputation, model training and tuning, the missingness experiment, SHAP explainability analysis, and the fairness audit) is publicly available at: \url{https://github.com/wrim786-collab/mimic3-mortality-fairness-audit-}.
+
+\textbf{Data availability.} This study uses the MIMIC-III (Medical Information Mart for Intensive Care III) database (Johnson et al., 2016). MIMIC-III is publicly available but requires completion of PhysioNet's human-subjects research training and a signed Data Use Agreement prior to access, via \url{https://physionet.org/content/mimiciii/}. In compliance with PhysioNet's data-sharing policy, no raw patient data is included in the code repository; only the analysis code is shared.
+
+
+\section{Summary}
+This chapter described the dataset, the admission-time feature restriction adopted to eliminate target leakage, the preprocessing pipeline, the missingness design, the models, and the evaluation framework. The methodology enables a systematic, leakage-free comparison of imputation-based and direct missing-data handling along three dimensions --- predictive performance, explainability, and fairness --- which forms the basis of the results presented in the following chapter.
+
+
+\chapter{Results}
+
+\section{Introduction}
+This chapter presents the experimental findings of the study, based on the admission-time, leakage-free feature set described in Chapter 3. The results are organised according to the three research questions: predictive performance under varying missingness (RQ1), model explainability through feature attribution (RQ2), and fairness across demographic subgroups (RQ3). All experiments were conducted on the cleaned MIMIC-III cohort of 50,866 adult admissions, with in-hospital mortality as the prediction target.
+
+
+\section{Baseline Model Performance}
+Three classifiers were trained across six missing-data strategies to establish baseline predictive performance for admission-time in-hospital mortality, using a factorial design that separates the effect of the imputation method from the effect of the learning algorithm. Table~\ref{tab:baseline-perf} reports AUROC and AUPRC for each imputation-model combination.
+
+
+\begin{table}[H]
+\centering
+\caption{Predictive performance (AUROC and AUPRC) for each imputation-model combination, admission-time features only.}
+\label{tab:baseline-perf}
+\small
+\begin{tabular}{lll}
+\toprule
+Imputation & Model & AUROC (AUPRC) \\
+\midrule
+Mean & Logistic Regression & 0.643 (0.170) \\
+Mean & Random Forest & 0.736 (0.278) \\
+Mean & XGBoost & 0.777 (0.343) \\
+Median & Logistic Regression & 0.643 (0.170) \\
+Median & Random Forest & 0.738 (0.276) \\
+Median & XGBoost & 0.772 (0.338) \\
+KNN & Logistic Regression & 0.642 (0.170) \\
+KNN & Random Forest & 0.737 (0.277) \\
+KNN & XGBoost & 0.771 (0.331) \\
+MICE & Logistic Regression & 0.643 (0.170) \\
+MICE & Random Forest & 0.738 (0.284) \\
+MICE & XGBoost & 0.769 (0.332) \\
+MissForest & Logistic Regression & 0.643 (0.170) \\
+MissForest & Random Forest & 0.738 (0.283) \\
+MissForest & XGBoost & 0.773 (0.331) \\
+Native & XGBoost & 0.707 (0.306) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+XGBoost consistently achieved the highest discrimination across imputation methods (AUROC 0.769--0.777), followed by random forest (0.736--0.738), with logistic regression clearly lowest (0.642--0.643), reflecting its inability to capture the non-linear structure in categorical admission-time variables such as admitting diagnosis and procedure. Native handling by XGBoost, without prior imputation, attained an AUROC of 0.707 --- noticeably lower than every imputed variant, unlike the near-identical performance observed in the earlier, leakage-affected version of this analysis. Following the tuning procedure described in Section 3.7 and to keep a single, pre-registered pipeline for downstream explainability and fairness analysis, MICE imputation paired with (tuned) XGBoost was retained as the primary model; its test-set performance (AUROC 0.769, AUPRC 0.332) is reported with full metrics in Table~\ref{tab:best-model-metrics}. Mean and MissForest imputation produced marginally higher untuned AUROC (0.777 and 0.773 respectively); the practical difference between the top-performing imputation methods is small relative to the gap to native handling, and is discussed further in Chapter 5. The lower AUPRC values relative to AUROC are expected given the class imbalance, as the mortality rate in the cleaned cohort was 11.4\%.
+
+
+\begin{table}[H]
+\centering
+\caption{Performance metrics of the primary model (XGBoost with MICE imputation, tuned).}
+\label{tab:best-model-metrics}
+\begin{tabular}{ll}
+\toprule
+Metric & Value \\
+\midrule
+AUROC (95\% bootstrap CI) & 0.769 (0.755--0.784) \\
+AUPRC & 0.332 \\
+Sensitivity (Recall) & 0.599 \\
+Specificity & 0.788 \\
+Precision & 0.267 \\
+F1-score & 0.369 \\
+Brier score & 0.158 \\
+False-Negative Rate (FNR) & 0.401 \\
+Cross-validated AUROC (15 folds, 3 seeds) & 0.761 $\pm$ 0.006 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Effect of Missingness on Predictive Performance (RQ1)}
+To address RQ1, synthetic missingness was introduced at 10\%, 30\%, and 50\% under MCAR, MAR, and MNAR mechanisms, and performance was compared for two representative pipelines: Track A (mean imputation followed by random forest) and Track B (XGBoost with native missing-value handling). Table~\ref{tab:rq1-missingness} reports AUROC and AUPRC for the original data and all nine synthetic conditions.
+
+
+\begin{table}[H]
+\centering
+\caption{RQ1: AUROC and AUPRC across missingness mechanism and rate.}
+\label{tab:rq1-missingness}
+\small
+\begin{tabular}{lllll}
+\toprule
+Version & Track A AUROC & Track A AUPRC & Track B AUROC & Track B AUPRC \\
+\midrule
+Original & 0.643 & 0.176 & 0.675 & 0.215 \\
+MCAR 10\% & 0.638 & 0.170 & 0.675 & 0.211 \\
+MCAR 30\% & 0.631 & 0.170 & 0.658 & 0.190 \\
+MCAR 50\% & 0.633 & 0.171 & 0.626 & 0.160 \\
+MAR 10\% & 0.636 & 0.175 & 0.598 & 0.154 \\
+MAR 30\% & 0.623 & 0.160 & 0.585 & 0.144 \\
+MAR 50\% & 0.605 & 0.153 & 0.573 & 0.146 \\
+MNAR 10\% & 0.640 & 0.176 & 0.663 & 0.196 \\
+MNAR 30\% & 0.622 & 0.167 & 0.657 & 0.193 \\
+MNAR 50\% & 0.642 & 0.172 & 0.626 & 0.168 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+The pattern differs by mechanism and by pipeline. Track A (mean imputation with random forest) degraded gradually and modestly as missingness increased, with the largest decline under MAR (AUROC falling from 0.643 at baseline to 0.605 at 50\% MAR). Track B (native XGBoost handling) was more sensitive to the MAR mechanism specifically, falling from 0.675 (original) to 0.573 at 50\% MAR --- a decline of roughly 0.10 AUROC --- while remaining comparatively stable under MCAR and MNAR. This indicates that native handling and mean imputation are not equally robust across missingness mechanisms: mean imputation degrades more uniformly, whereas native handling is disproportionately affected when missingness depends on an associated observed variable (MAR). Figure~\ref{fig:rq1-plot} shows AUROC against missingness rate, one line per mechanism, for both tracks.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{RQ1_missingness_plot.png}
+\caption{AUROC across missingness mechanism and rate for Track A (imputation) and Track B (native handling).}
+\label{fig:rq1-plot}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{calibration_curve.png}
+\caption{Calibration curve for the primary model (XGBoost with MICE imputation), showing predicted versus observed mortality probabilities.}
+\label{fig:calibration}
+\end{figure}
+
+
+\section{Model Explainability (RQ2)}
+To address RQ2, SHAP was applied to the primary (MICE + XGBoost) model to identify the most influential admission-time features. Table~\ref{tab:shap-stability} lists the mean absolute SHAP value for each feature under each imputation method, together with the average across methods, allowing both the ranking and its stability to be assessed simultaneously.
+
+
+\begin{table}[H]
+\centering
+\caption{Mean absolute SHAP value by feature and imputation method.}
+\label{tab:shap-stability}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Feature & Mean & Median & KNN & MICE & MissForest & Average \\
+\midrule
+AdmitProcedure & 0.747 & 0.752 & 0.731 & 0.752 & 0.731 & 0.742 \\
+age & 0.416 & 0.406 & 0.421 & 0.425 & 0.428 & 0.419 \\
+AdmitDiagnosis & 0.306 & 0.399 & 0.346 & 0.337 & 0.321 & 0.342 \\
+admit\_type & 0.307 & 0.343 & 0.313 & 0.317 & 0.303 & 0.317 \\
+religion & 0.200 & 0.206 & 0.207 & 0.188 & 0.188 & 0.198 \\
+ethnicity & 0.149 & 0.156 & 0.154 & 0.155 & 0.151 & 0.153 \\
+marital\_status & 0.140 & 0.123 & 0.139 & 0.143 & 0.132 & 0.135 \\
+admit\_location & 0.120 & 0.126 & 0.124 & 0.118 & 0.124 & 0.123 \\
+insurance & 0.115 & 0.137 & 0.114 & 0.098 & 0.110 & 0.115 \\
+gender & 0.040 & 0.039 & 0.038 & 0.043 & 0.043 & 0.041 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+The admitting procedure code was the single most important predictor across every imputation method, followed by age and admitting diagnosis. This is clinically plausible: the coded procedure and diagnosis recorded at admission reflect the acuity and nature of the presenting condition, and age is a well-established mortality risk factor. Demographic attributes not directly tied to clinical presentation --- gender, insurance, and marital status --- were consistently the least influential predictors. The ranking was stable across all five imputation methods; the largest relative shift was in the importance of admitting diagnosis (0.306--0.399), while the top two features (admitting procedure and age) never changed rank. This indicates that the choice of imputation method has a modest effect on the magnitude of feature attributions but does not change the model's substantive explanation of which features drive its predictions. Figure~\ref{fig:shap-beeswarm} and Figure~\ref{fig:shap-bar} show the corresponding SHAP summary and bar plots; Figure~\ref{fig:shap-dependence} shows dependence plots for age, admitting diagnosis, and admitting procedure; Figure~\ref{fig:shap-waterfall} shows patient-level waterfall plots for a surviving and an expired patient.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{shap_beeswarm.png}
+\caption{SHAP summary (beeswarm) plot for the primary model.}
+\label{fig:shap-beeswarm}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{shap_bar.png}
+\caption{SHAP feature importance (mean absolute SHAP values) for the primary model.}
+\label{fig:shap-bar}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{shap_dependence_age.png}
+\includegraphics[width=0.48\textwidth]{shap_dependence_AdmitDiagnosis.png}\\[4pt]
+\includegraphics[width=0.48\textwidth]{shap_dependence_AdmitProcedure.png}
+\caption{SHAP dependence plots for age, admitting diagnosis, and admitting procedure.}
+\label{fig:shap-dependence}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{shap_waterfall_survived.png}
+\includegraphics[width=0.48\textwidth]{shap_waterfall_expired.png}
+\caption{SHAP waterfall plots for a surviving patient (left) and an expired patient (right).}
+\label{fig:shap-waterfall}
+\end{figure}
+
+
+\section{Fairness Audit (RQ3)}
+To address RQ3, fairness was audited across four sensitive attributes (gender, insurance, age band, and ethnicity) using four metrics --- demographic parity difference, equal opportunity difference, equalized odds difference, and the false-negative-rate (FNR) gap --- each accompanied by a bootstrap 95\% confidence interval. Table~\ref{tab:fairness-summary} reports the results for the primary model (XGBoost with MICE imputation).
+
+
+\begin{table}[H]
+\centering
+\caption{Fairness gaps with 95\% bootstrap confidence intervals, primary model.}
+\label{tab:fairness-summary}
+\small
+\begin{tabular}{lccc}
+\toprule
+Attribute & Demographic Parity Diff. & Equal Opportunity Diff. & FNR Gap (95\% CI) \\
+\midrule
+Gender & 0.023 & 0.015 & 0.015 (0.001--0.072) \\
+Insurance & 0.225 & 0.270 & 0.270 (0.174--0.526) \\
+Age band & 0.305 & 0.464 & 0.464 (0.337--0.576) \\
+Ethnicity & 0.338 & 0.625 & 0.625 (0.356--1.000) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Disparities were smallest for gender (FNR gap 0.015, CI 0.001--0.072) and largest for ethnicity (FNR gap 0.625) and age band (0.464), with insurance intermediate (0.270). The ethnicity confidence interval is wide (up to 1.000), reflecting the presence of very small subgroups (several ethnicity categories have fewer than 50 patients in the test set); this result should therefore be interpreted as indicative rather than precise, and is discussed further in Chapter 5. Table~\ref{tab:insurance-subgroups} and Table~\ref{tab:agebandsubgroups} report the underlying per-subgroup sensitivity and FNR values for insurance and age band, the two attributes with moderate-to-large subgroup sizes.
+
+
+\begin{table}[H]
+\centering
+\caption{Sensitivity (TPR) and false-negative rate by insurance group.}
+\label{tab:insurance-subgroups}
+\small
+\begin{tabular}{lccc}
+\toprule
+Insurance Group & N & Sensitivity & FNR \\
+\midrule
+Medicare & 5655 & 0.645 & 0.355 \\
+Private & 3224 & 0.529 & 0.471 \\
+Medicaid & 914 & 0.473 & 0.527 \\
+Government & 261 & 0.417 & 0.583 \\
+Self-Pay & 120 & 0.375 & 0.625 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[H]
+\centering
+\caption{Sensitivity (TPR) and false-negative rate by age band.}
+\label{tab:agebandsubgroups}
+\small
+\begin{tabular}{lccc}
+\toprule
+Age Band & N & Sensitivity & FNR \\
+\midrule
+75+ & 2398 & 0.687 & 0.313 \\
+60--75 & 3157 & 0.602 & 0.398 \\
+40--60 & 3501 & 0.556 & 0.444 \\
+\textless 40 & 1118 & 0.222 & 0.778 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+By this analysis, Self-Pay patients (FNR 0.625, n=120) and the under-40 age band (FNR 0.778, n=1118) show the highest false-negative rates, while Medicare patients --- despite being the largest insurance group --- have the lowest FNR among insurance categories (0.355). This is a materially different pattern from an earlier iteration of this analysis, and is discussed in Chapter 5 together with the small-sample caveats that apply to the Self-Pay and several ethnicity subgroups.
+
+Figure~\ref{fig:fairness-gaps} visualises the fairness gaps across all four attributes.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{fairness_metrics.png}
+\caption{Fairness gaps across sensitive attributes, with bootstrap confidence intervals.}
+\label{fig:fairness-gaps}
+\end{figure}
+
+
+\section{Statistical Comparison of Missing-Data Strategies}
+To test whether MICE imputation and XGBoost's native missing-value handling differ significantly in predictive performance, a bootstrap test was applied to the paired test-set AUROC (1000 resamples), and the McNemar test was applied to the paired classification errors. The bootstrap 95\% confidence interval for the AUROC difference (MICE minus native) was [0.047, 0.078], and the McNemar test gave $p < 0.001$, confirming that MICE imputation is both statistically and practically superior to native handling in this leakage-free setting --- unlike the earlier, leakage-affected analysis, in which the two pipelines had appeared nearly indistinguishable.
+
+Separately, a Wilcoxon signed-rank test compared cross-validated AUROC before and after hyperparameter tuning (10-fold stratified cross-validation): the untuned model achieved 0.765 $\pm$ 0.008 and the tuned model 0.780 $\pm$ 0.006 (Wilcoxon $p = 0.002$), confirming that tuning produced a small but statistically significant improvement. Table~\ref{tab:stat-tests} summarises these comparisons.
+
+
+\begin{table}[H]
+\centering
+\caption{Statistical comparison of missing-data strategies and tuning.}
+\label{tab:stat-tests}
+\small
+\begin{tabular}{lll}
+\toprule
+Comparison / Test & Result & Significance \\
+\midrule
+MICE vs.\ Native AUROC diff. (bootstrap 95\% CI) & [0.047, 0.078] & Significant \\
+McNemar test (paired errors, MICE vs.\ Native) & $p < 0.001$ & Significant \\
+Wilcoxon signed-rank (tuned vs.\ untuned CV AUROC) & $p = 0.002$ & Significant \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Comparison of Missing-Data Strategies on Fairness}
+A further contribution of this study is comparing how the missing-data strategy affects fairness, not only accuracy. For each of the six missing-data strategies, a dedicated XGBoost model was trained (mirroring the SHAP-stability procedure in Section 4.3), and the same four fairness metrics were computed against the four sensitive attributes. Table~\ref{tab:fairness-fnr-allmethods} reports the resulting false-negative-rate (FNR) gap --- the study's primary fairness criterion --- for every strategy and attribute; the demographic-parity, equal-opportunity, and equalized-odds gaps followed the same broad pattern and are provided in the accompanying results file.
+
+
+\begin{table}[H]
+\centering
+\caption{False-negative-rate (FNR) gap by missing-data strategy and sensitive attribute.}
+\label{tab:fairness-fnr-allmethods}
+\begin{tabular}{lcccc}
+\toprule
+Strategy & Gender & Insurance & Age Band & Ethnicity \\
+\midrule
+Mean & 0.038 & 0.415 & 0.463 & 0.624 \\
+Median & 0.012 & 0.301 & 0.396 & 0.667 \\
+KNN & 0.019 & 0.346 & 0.403 & 0.625 \\
+MICE & 0.015 & 0.270 & 0.464 & 0.625 \\
+MissForest & 0.023 & 0.230 & 0.399 & 0.667 \\
+Native & 0.012 & 0.260 & 0.315 & 0.833 \\
+\midrule
+Range (max--min) & 0.026 & 0.185 & 0.149 & 0.209 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+The results show clearly that the missing-data strategy is \emph{not} fairness-neutral, and, importantly, that no single strategy is uniformly fairest across attributes. For insurance, MissForest achieved the smallest FNR gap (0.230) while mean imputation was worst (0.415) --- a difference of 0.185, larger than the gap itself for several strategies. For age band, native handling was distinctly the fairest option (FNR gap 0.315, compared with 0.396--0.464 for every imputation method). For ethnicity, however, the pattern reverses sharply: native handling produced the \emph{largest} FNR gap of any strategy--attribute combination in the study (0.833), well above every imputation method (0.624--0.667), while mean imputation --- the simplest and least sophisticated strategy, and the worst performer for insurance --- was in fact the fairest for ethnicity. Gender showed the smallest range across strategies (0.026) and was never a strong source of disparity regardless of strategy.
+
+This is a substantive finding rather than a minor technical footnote: a researcher or practitioner who selected a missing-data strategy purely on the basis of predictive performance (Section 4.2, where MICE and mean imputation were essentially tied) could unknowingly select a strategy that is comparatively fair on one attribute (e.g., native handling on age band) while being the least fair option available on another (native handling on ethnicity, where its FNR gap is more than 0.2 higher than any imputation method). This confirms, with direct cross-strategy evidence rather than a single-pipeline audit, the study's central claim that missing-data handling should not be assumed to be fairness-neutral, and that fairness should be assessed per attribute and per strategy rather than assumed to transfer from one pairing to another.
+
+
+\section{Summary}
+The results demonstrate that, once the predictor set is restricted to information genuinely available at admission, MICE imputation combined with XGBoost achieves the best and most robust performance (AUROC 0.769, 95\% CI 0.755--0.784), meaningfully outperforming XGBoost's native missing-value handling (AUROC 0.707; bootstrap CI for the difference [0.047, 0.078]; McNemar $p<0.001$) (RQ1). SHAP analysis confirmed that the model relies on clinically meaningful features --- the admitting procedure code, age, and admitting diagnosis --- and that this ranking is stable across imputation methods (RQ2). The fairness audit revealed substantial subgroup disparities, largest for ethnicity (FNR gap 0.625, primary MICE pipeline) and age band (0.464), smallest for gender (0.015), with several of the most-affected subgroups (Self-Pay, under-40, and multiple ethnicity categories) being small in sample size, which widens their confidence intervals and warrants cautious interpretation. Extending this audit across all six missing-data strategies (Section 4.6) showed that no single strategy is uniformly fairest: native handling was the fairest option for age band (FNR gap 0.315) but the least fair for ethnicity (0.833), while mean imputation showed the opposite pattern, confirming that the choice of missing-data strategy interacts with fairness in an attribute-specific way (RQ3).
+
+
+\chapter{Discussion}
+
+\section{Introduction}
+This chapter interprets the results presented in Chapter 4 and places them in the wider context of clinical machine learning. It discusses the meaning of each research question, relates the results to previous studies, considers their clinical importance, and discusses the study's limitations. The discussion is organised around the three research questions, followed by a synthesis of the study's main contribution.
+
+
+\section{Predictive Performance Under Missingness (RQ1)}
+The first research question asked whether imputation-based and direct (native) handling of missing data perform comparably for admission-time mortality prediction. Once outcome-adjacent features were removed, the two approaches were \emph{not} equivalent: MICE imputation with XGBoost achieved an AUROC of 0.769, compared with 0.707 for native handling, a difference that is both statistically significant (bootstrap CI [0.047, 0.078]; McNemar $p<0.001$) and practically meaningful. This is a materially different conclusion from an earlier, leakage-affected iteration of this analysis, in which the two approaches appeared to differ only marginally (AUROC 0.936 vs.\ 0.929); with the outcome-adjacent features removed, the genuine advantage of imputation becomes visible.
+
+Performance under synthetic missingness (RQ1, Table~\ref{tab:rq1-missingness}) showed that this advantage is mechanism-dependent: native handling degraded substantially under MAR missingness (AUROC falling to 0.573 at 50\% MAR, a decline of roughly 0.10 from baseline), while remaining comparatively stable under MCAR and MNAR. Imputation-based modelling (Track A) degraded more gradually across all three mechanisms. This is broadly consistent with prior work suggesting that models handling missingness internally can be sensitive to the specific missingness mechanism, whereas explicit imputation offers a more uniform, if not always superior, degradation profile (Bhandari and Tyagi, 2026). The result also clarifies that the choice between imputation and native handling should not be treated as fairness- or performance-neutral, particularly when the missingness mechanism is unknown or suspected to be MAR, as is plausible in routinely collected EHR data.
+
+
+\section{Model Explainability (RQ2)}
+The second research question focused on identifying the admission-time features with the greatest influence on the model's predictions. SHAP analysis showed that the admitting procedure code, age, and admitting diagnosis were the most important predictors, and this ranking was consistent across all five imputation methods tested. These findings are clinically plausible: the coded procedure and diagnosis recorded at the point of admission are direct indicators of the severity and nature of the presenting condition, and age is among the most consistently reported risk factors for in-hospital mortality in the wider literature.
+
+The importance of these features, and their stability across imputation methods, is notable for two reasons. First, it suggests that the model is learning genuine clinical signal available at admission, rather than an artefact of the imputation procedure or of information that would not actually be available when the prediction is needed. Second, because demographic attributes not tied to clinical presentation (gender, insurance, marital status) were consistently the least influential features, the model does not appear to be relying primarily on demographic proxies for its overall discrimination --- although, as Section 5.3 discusses, this does not mean its \emph{errors} are distributed fairly across demographic subgroups.
+
+
+\section{Fairness Across Subgroups (RQ3)}
+The third research question examined fairness across demographic subgroups. The fairness audit revealed disparities that would not be visible from the aggregate AUROC alone. The largest FNR gap occurred for ethnicity (0.625) and age band (0.464), followed by insurance (0.270), with gender showing the smallest gap (0.015).
+
+Two important qualifications apply to these findings. First, the ethnicity result is driven substantially by very small subgroups: several ethnicity categories in the test set contain fewer than 50 patients, and the corresponding bootstrap confidence interval is correspondingly wide (0.356--1.000). This result should be read as indicative of a potential disparity worth further, better-powered investigation, rather than as a precise estimate. Second, the pattern by insurance and age band differs from what might be assumed from prior literature emphasising older, Medicare-eligible patients as most at risk of being under-served by clinical algorithms: in this analysis, Medicare patients had the \emph{lowest} FNR among insurance groups (0.355), while Self-Pay patients (n=120) and the under-40 age band (n=1118) had the highest FNR (0.625 and 0.778 respectively). A plausible explanation is that both of these subgroups have low baseline mortality and correspondingly few true-positive cases for the model to learn from, which can inflate FNR estimates in small, low-prevalence subgroups; this is a statistical as well as a fairness consideration and is a reason to prefer confidence-interval-aware reporting over single point estimates when auditing subgroup fairness.
+
+
+\section{Effect of Missing-Data Strategy on Predictive Performance and Fairness}
+This study set out, in part, to establish whether missing-data handling can be assumed to be fairness- and performance-neutral. The results indicate it cannot, and the cross-strategy fairness comparison in Section 4.6 shows this more directly than performance alone. MICE imputation and native handling produced meaningfully different overall discrimination (0.769 vs.\ 0.707) and different degradation profiles under synthetic missingness, particularly under the MAR mechanism (Section 5.1). When the fairness audit was extended across all six strategies, a more nuanced picture emerged: rather than one strategy being simply ``more fair'' or ``less fair'' overall, fairness effects were attribute-specific. Native handling was the fairest strategy for age band (FNR gap 0.315, compared with 0.396--0.464 for every imputation method) but was clearly the least fair strategy for ethnicity (0.833, versus 0.624--0.667 for the imputation methods) --- the single largest fairness gap observed anywhere in this study. Mean imputation showed close to the opposite pattern: worst for insurance (0.415) and gender (0.038), yet joint-best for ethnicity (0.624).
+
+This attribute-specific interaction has a direct practical implication: a strategy cannot be selected as ``the fair choice'' in general, only as the fairer choice \emph{for a given protected attribute}. A pipeline tuned to minimise disparity for one attribute (e.g., native handling, favourable for age band) may simultaneously produce the worst disparity for another (ethnicity). Because ethnicity showed both the largest gaps overall and the widest strategy-to-strategy range (0.209), and because several ethnicity subgroups are small (Section 4.4), this trade-off deserves particular attention in any deployment decision, and reinforces the recommendation that fairness auditing should be repeated for the specific missing-data pipeline actually used in production, across all protected attributes of interest, rather than assumed from a single pipeline or a single attribute.
+
+
+\section{Clinical and Practical Implications}
+Several practical implications follow from these results. First, because MICE imputation meaningfully outperformed native handling in this admission-time setting, the choice of missing-data strategy should not be treated as an afterthought: it materially affects the discrimination that a deployed model could be expected to achieve. Second, the substantially higher false-negative rates observed for the under-40 age band and for Self-Pay patients --- both small, low-mortality subgroups --- suggest that any real-world use of a model of this kind should include regular, confidence-interval-aware monitoring of subgroup performance, since point estimates in small subgroups can be misleading in either direction. Third, the clinically plausible explanations produced by the model (admitting procedure, age, and admitting diagnosis as the leading predictors) support its potential role as a decision-support aid, provided its modest overall discrimination (AUROC 0.769) and its subgroup disparities are clearly communicated to clinicians, and provided it is understood as an admission-time triage signal rather than a definitive risk score.
+
+
+\section{Limitations}
+This study has several limitations that should be acknowledged. The MIMIC-III admissions cohort originates from a single tertiary hospital, so the fairness findings may not generalise to other populations or healthcare systems. The dataset consists of admission-level fields rather than time-series measurements or clinical notes, restricting the study to admission-level mortality prediction; incorporating richer admission-time signals (e.g., first-day vital signs or laboratory results, if re-extracted in a way that avoids look-ahead bias) could improve on the modest discrimination reported here. Several subgroups examined in the fairness audit --- notably Self-Pay patients and multiple ethnicity categories --- are small, and their point estimates carry wide confidence intervals; these findings should be treated as hypothesis-generating rather than confirmatory. Finally, the synthetic missingness used for RQ1, while enabling controlled comparison, may not fully reflect the patterns of missingness that occur in real clinical practice.
+
+
+\section{Summary}
+This chapter interpreted the study's findings in relation to existing literature. Once restricted to a genuinely admission-time feature set, MICE imputation with XGBoost achieved the best and most robust predictive performance, meaningfully outperforming native missing-value handling, particularly under MAR missingness; the model's most influential features (admitting procedure, age, admitting diagnosis) were clinically meaningful and stable across imputation methods (RQ1--RQ2). The fairness audit, extended across all six missing-data strategies, revealed substantial subgroup disparities, largest for ethnicity and age band, and showed that fairness effects are attribute-specific: no strategy was uniformly fairest, with native handling best for age band but worst for ethnicity, and mean imputation showing close to the opposite pattern; several of the underlying subgroups are small and should be interpreted cautiously (RQ3). Collectively, these findings support the study's central argument: that missing-data handling, explainability, and fairness are interconnected, that the choice of missing-data strategy should not be assumed to be neutral for any single protected attribute, and that fairness should be assessed per attribute, per strategy, and with appropriate uncertainty quantification given real-world subgroup sample sizes.
+
+
+\chapter{Conclusion}
+
+\section{Introduction}
+This final chapter summarises the study, restates its key findings in relation to the research questions, articulates its main contributions, acknowledges its limitations, and proposes directions for future research.
+
+
+\section{Summary of the Study}
+This study conducted an interpretable bias audit of admission-time in-hospital mortality prediction, using a leakage-free feature set restricted to information available at admission, across six missing-data strategies, three synthetic missingness mechanisms (MCAR, MAR, MNAR), and four sensitive attributes, on a cleaned MIMIC-III cohort of 50,866 adult admissions.
+
+
+\section{Key Findings}
+
+\textbf{RQ1 --- Predictive performance.} Once outcome-adjacent features were removed, the best admission-time model (MICE imputation with tuned XGBoost) achieved an AUROC of 0.769 (95\% CI 0.755--0.784), meaningfully and significantly outperforming XGBoost's native missing-value handling (AUROC 0.707; bootstrap CI for the difference [0.047, 0.078]; McNemar $p<0.001$). Performance under synthetic missingness showed that native handling is disproportionately affected by the MAR mechanism, while imputation degrades more gradually across all three mechanisms.
+
+\textbf{RQ2 --- Explainability.} SHAP analysis identified the admitting procedure code, age, and admitting diagnosis as the most influential predictors, all clinically meaningful and available at admission. This ranking was stable across all five imputation methods tested.
+
+\textbf{RQ3 --- Fairness.} Despite modest overall discrimination, the model exhibited substantial subgroup disparities, largest for ethnicity (FNR gap 0.625) and age band (0.464), smallest for gender (0.015). Several of the most-affected subgroups (Self-Pay patients, the under-40 age band, and multiple ethnicity categories) are small in sample size, and their estimates carry correspondingly wide confidence intervals. Extending the fairness audit across all six missing-data strategies showed that no single strategy is uniformly fairest: native handling produced the smallest FNR gap for age band (0.315) but the largest for ethnicity (0.833) of any strategy--attribute combination in the study, while mean imputation showed close to the reverse pattern. This confirms that missing-data handling interacts with fairness in an attribute-specific way, rather than uniformly helping or harming fairness overall.
+
+
+\section{Contributions}
+The main contribution of this study is to examine missing-data handling, explainability, and fairness together, within a mortality-prediction task that is explicitly restricted to information available at the time of admission. The study makes the following contributions:
+
+It demonstrates that, once target leakage is removed, the choice between imputation and native missing-data handling is not performance-neutral: MICE imputation meaningfully outperformed native handling in this admission-time setting, and the two approaches respond differently to different missingness mechanisms.
+
+It confirms, through SHAP analysis, that the model's predictions rest on clinically meaningful, admission-time features, and that this explanation is stable across imputation methods.
+
+It provides a subgroup fairness audit, with bootstrap confidence intervals, that reveals disparities --- most notably for ethnicity and the under-40 age band --- that aggregate performance metrics conceal, while also demonstrating the importance of reporting uncertainty alongside fairness point estimates, particularly for small subgroups.
+
+It extends this fairness audit across all six missing-data strategies and shows that the effect of missing-data handling on fairness is attribute-specific rather than uniform: native handling was the fairest strategy for age band but the least fair for ethnicity, and mean imputation showed close to the opposite pattern, demonstrating concretely that a missing-data strategy cannot be assumed fair (or unfair) in general, only with respect to a specific protected attribute.
+
+It offers a worked example of how failing to restrict a clinical prediction model to genuinely available-at-admission features can produce an inflated and misleading picture of predictive performance, and provides a corrected, leakage-free baseline for this task on the MIMIC-III cohort.
+
+
+\section{Limitations}
+The study's findings should be considered in light of its limitations. The data originates from a single tertiary hospital, limiting the generalisability of the fairness findings. The use of admission-level fields, rather than time-series data or clinical notes, restricts both the achievable discrimination and the scope of the analysis to admission-level mortality prediction. Several subgroups are small, and the corresponding fairness estimates should be treated as indicative rather than confirmatory. The synthetic missingness used for RQ1, while enabling controlled experimentation, may not fully capture real-world missingness patterns. Finally, the six-strategy fairness comparison (Section 4.6) trained one model per strategy without repeated cross-validation or bootstrap confidence intervals on each strategy's fairness gaps individually (unlike the primary MICE pipeline in Section 4.4); the observed cross-strategy differences, particularly the large ethnicity gap for native handling, would benefit from confirmation with repeated resampling in future work.
+
+
+\section{Future Work}
+Several directions emerge for future research. First, external validation was not performed; future work should validate the admission-time model on independent datasets such as MIMIC-IV and eICU, since the present cohort originates from a single centre. Second, having established that fairness effects differ by missing-data strategy in an attribute-specific way (Section 4.6), future work should add bootstrap confidence intervals to each strategy's fairness gaps individually, and repeat the comparison across multiple seeds, to confirm that the observed strategy-by-attribute interactions --- particularly the large ethnicity gap for native handling --- are stable rather than sensitive to a single train-test split. Third, fairness-aware mitigation techniques could be applied to reduce the ethnicity and age-band disparities observed, with particular attention to the small-subgroup estimation issues identified in Chapter 5, and with awareness that a mitigation tuned for one protected attribute may not transfer to another. Finally, incorporating additional admission-time signals --- such as first-day vital signs, if extracted in a way that avoids look-ahead bias --- could improve on the modest discrimination achieved by the current, strictly admission-time feature set.
+
+
+\section{Concluding Remarks}
+This study set out to investigate whether the way missing data is handled affects the fairness and explainability of a clinical mortality-prediction model, once that model is properly restricted to information available at the time of admission. The results indicate that, once this restriction is applied, imputation and native missing-value handling are not interchangeable: they differ meaningfully in predictive performance and in their sensitivity to different missingness mechanisms. The model exhibits subgroup disparities that are invisible at the aggregate level, several of which involve small subgroups and warrant cautious, confidence-interval-aware interpretation. These findings highlight an important point: in clinical machine learning, accuracy, explainability, and fairness are closely linked, and decisions made at any stage of the modelling process --- including basic steps like feature selection and missing-data handling --- can affect how fairly patients are treated. Building clinical prediction systems that are accurate, transparent, and fair therefore requires considering these aspects together, on a feature set that genuinely reflects what would be known at the point the prediction is made.
+
+
+\chapter*{References}
+\addcontentsline{toc}{chapter}{References}
+
+\begingroup\sloppy
+\begin{enumerate}
+  \item Alsentzer E, Murphy J, Boag W, Weng WH, Jindi D, Naumann T, McDermott M (2019) Publicly available clinical BERT embeddings. In: Proceedings of the 2nd Clinical Natural Language Processing Workshop, pp 72--78
+  \item Athukorala VS, Ilmini WMKS (2026) Explainable AI for critical care: a systematic review of interpretable models for sepsis and ICU mortality prediction. BMC Med Inform Decis Mak. \url{https://doi.org/10.1186/s12911-026-03344-0}
+  \item Bhandari A, Tyagi S (2026) A comparative evaluation of handling missing data points and modalities in electronic health records. Int J Med Inform 210:106302. \url{https://doi.org/10.1016/j.ijmedinf.2026.106302}
+  \item Carriero A, Luijken K, de Hond A, Moons KGM, van Calster B, van Smeden M (2025) The harms of class imbalance corrections for machine learning based prediction models: a simulation study. Stat Med. \url{https://doi.org/10.1002/sim.10320}
+  \item Chen IY, Pierson E, Rose S, Joshi S, Ferryman K, Ghassemi M (2021) Ethical machine learning in healthcare. Annu Rev Biomed Data Sci 4:123--144
+  \item Chen Z, Li T, Guo S, Zeng D, Wang K (2023) Machine learning-based in-hospital mortality risk prediction tool for ICU patients with heart failure. Front Cardiovasc Med 10:1119699. \url{https://doi.org/10.3389/fcvm.2023.1119699}
+  \item Dwork C, Hardt M, Pitassi T, Reingold O, Zemel R (2012) Fairness through awareness. In: Proceedings of the 3rd Innovations in Theoretical Computer Science Conference, pp 214--226
+  \item Hardt M, Price E, Srebro N (2016) Equality of opportunity in supervised learning. Adv Neural Inf Process Syst 29:3315--3323
+  \item Huang T, Le D, Yuan L, Xu S, Peng X (2023) Machine learning for prediction of in-hospital mortality in lung cancer patients admitted to intensive care unit. PLoS One 18(1):e0280606
+  \item Hou N, Li M, He L, Xie B, Wang L, Zhang R, Yu Y, Sun X, Pan Z, Wang K (2020) Predicting 30-days mortality for MIMIC-III patients with sepsis-3: a machine learning approach using XGBoost. J Transl Med 18(1):462
+  \item Johnson AEW, Pollard TJ, Shen L, Lehman LWH, Feng M, Ghassemi M, Moody B, Szolovits P, Celi LA, Mark RG (2016) MIMIC-III, a freely accessible critical care database. Sci Data 3:160035. \url{https://doi.org/10.1038/sdata.2016.35}
+  \item Johnson AEW, Bulgarelli L, Shen L, Gayles A, Shammout A, Horng S, Pollard TJ, Hao S, Moody B, Gow B et al (2023) MIMIC-IV, a freely accessible electronic health record dataset. Sci Data 10:1. \url{https://doi.org/10.1038/s41597-022-01899-x}
+  \item Liu Z, Capurro D, Nguyen A, Verspoor K (2022) Interpretability and fairness evaluation of deep learning models on the MIMIC-IV dataset. Sci Rep 12:7166. \url{https://doi.org/10.1038/s41598-022-11012-2}
+  \item Lundberg SM, Lee SI (2017) A unified approach to interpreting model predictions. Adv Neural Inf Process Syst 30:4765--4774
+  \item Obermeyer Z, Powers B, Vogeli C, Mullainathan S (2019) Dissecting racial bias in an algorithm used to manage the health of populations. Science 366(6464):447--453. \url{https://doi.org/10.1126/science.aax2342}
+  \item Pylarinou C, Mulita F, Koletsis E, Leivaditis V, Liolis E, Gortzis L, Mavrilas D (2026) A clinical decision support system for post-surgical cardiovascular remote monitoring. Clin Pract 16:93. \url{https://doi.org/10.3390/clinpract16050093}
+  \item Ribeiro MT, Singh S, Guestrin C (2016) Why should I trust you? Explaining the predictions of any classifier. In: Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp 1135--1144
+  \item Stekhoven DJ, Buhlmann P (2012) MissForest: non-parametric missing value imputation for mixed-type data. Bioinformatics 28(1):112--118
+  \item Stenwig E, Salvo Rossi P, Salvi G, Skjærvold NK (2025) The impact of feature combinations on machine learning models for in-hospital mortality prediction. Sci Rep 15. \url{https://doi.org/10.1038/s41598-025-26611-y}
+  \item van Buuren S, Groothuis-Oudshoorn K (2011) MICE: multivariate imputation by chained equations in R. J Stat Softw 45(3):1--67
+  \item Abdullah SM, Alotaibi H, et al. (2025) Interpretable machine learning framework for diabetes prediction: integrating SMOTE balancing with SHAP explainability. Healthcare 13(20):2588. \url{https://doi.org/10.3390/healthcare13202588}
+  \item Aljuaid T, et al. (2023) Extremely missing numerical data in electronic health records for machine learning can be managed through simple imputation methods considering informative missingness: a comparative study in a COVID-19 mortality case. Comput Methods Programs Biomed. \url{https://doi.org/10.1016/j.cmpb.2023.107791}
+  \item Chaddad A, Peng J, Xu J, Bouridane A (2023) Survey of explainable AI techniques in healthcare. Sensors 23(2):634. \url{https://doi.org/10.3390/s23020634}
+  \item Chowdhury MEH, et al. (2024) A comparative analysis of LIME and SHAP interpreters with explainable ML for diabetes prediction. IEEE Access. \url{https://doi.org/10.1109/ACCESS.2024.3422319}
+  \item Lin X, et al. (2024) Machine learning models to predict 30-day mortality for critical patients with myocardial infarction: a retrospective analysis from the MIMIC-IV database. Front Cardiovasc Med 11:1368022
+  \item Mao B, et al. (2023) Machine learning for the prediction of in-hospital mortality in patients with spontaneous intracerebral hemorrhage. medRxiv. \url{https://doi.org/10.1101/2023.08.15.23294147}
+  \item Moazemi S, et al. (2023) Artificial intelligence for clinical decision support for monitoring patients in cardiovascular ICUs: a systematic review. Front Med 10:1109411. \url{https://doi.org/10.3389/fmed.2023.1109411}
+  \item Nasarian E, Alizadehsani R, Acharya UR, Tsui KL (2024) Designing interpretable ML systems to enhance trust in healthcare: a systematic review. Inf Fusion 108:102412
+  \item Rahman A, et al. (2025) Machine learning-based mortality prediction in critically ill patients with hypertension: comparative analysis, fairness, and interpretability. medRxiv. \url{https://doi.org/10.1101/2025.04.05.25325307}
+  \item Rudin C (2019) Stop explaining black box machine learning models for high-stakes decisions and use interpretable models instead. Nat Mach Intell 1:206--215
+  \item Sadeghi Z, Alizadehsani R, Cifci MA, et al. (2024) A review of explainable artificial intelligence in healthcare. Comput Electr Eng 118:109370. \url{https://doi.org/10.1016/j.compeleceng.2024.109370}
+  \item Singer M, Deutschman CS, Seymour CW, et al. (2016) The third international consensus definitions for sepsis and septic shock (Sepsis-3). JAMA 315(8):801--810
+  \item Spitzer P, Holstein J, Morrison K, Holstein K, Satzger G, Kühl N (2025) Don't be fooled: the misinformation effect of explanations in human--AI collaboration. Int J Hum Comput Interact. \url{https://doi.org/10.1080/10447318.2025.2574511}
+  \item Stylianides C, et al. (2025) AI advances in ICU with an emphasis on sepsis prediction: an overview. Mach Learn Knowl Extr 7(1):6. \url{https://doi.org/10.3390/make7010006}
+  \item Tang S, et al. (2025) A systematic review of the prognostic performance of AI and machine learning models for mortality prediction in intensive care units. \url{https://doi.org/10.3390/jpm12030514}
+  \item Wang D, Li J, Sun Y, et al. (2021) A machine learning model for accurate prediction of sepsis in ICU patients. Front Public Health 9:754348. \url{https://doi.org/10.3389/fpubh.2021.754348}
+  \item Wei Y, et al. (2024) Assessing in-hospital mortality risk in ICU lung cancer patients using machine learning: an analysis based on the MIMIC-IV database. PLoS One. \url{https://doi.org/10.1371/journal.pone.0341259}
+  \item Yang Z, Cui X, Song Z (2023) Predicting sepsis onset in ICU using machine learning models: a systematic review and meta-analysis. BMC Infect Dis 23(1). \url{https://doi.org/10.1186/s12879-023-08614-0}
+  \item Zhang Y, et al. (2023) Machine learning for the prediction of sepsis-related death: a systematic review and meta-analysis. BMC Med Inform Decis Mak 23(1). \url{https://doi.org/10.1186/s12911-023-02383-1}
+  \item Zhao X, et al. (2024) Machine learning for in-hospital mortality prediction in critically ill patients with acute heart failure: a retrospective analysis based on the MIMIC-IV database. J Cardiothorac Vasc Anesth. \url{https://doi.org/10.1053/j.jvca.2024.09.029}
+\end{enumerate}
+\endgroup
+
+\end{document}
