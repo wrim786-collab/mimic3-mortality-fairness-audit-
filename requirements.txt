@@ -1,9 +1,0 @@
-# Python package versions used for this analysis (confirmed by running
-# a version-check cell in the analysis notebook).
-
-scikit-learn==1.7.2
-xgboost==3.2.0
-pandas==2.3.3
-numpy==2.3.5
-scipy==1.15.3
-shap==0.52.0
